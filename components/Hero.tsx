@@ -1,43 +1,204 @@
 'use client'
 
 import { motion } from 'framer-motion'
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 
-type Node = { x: number; y: number; layer: number; r: number }
-
-const layers = [4, 6, 6, 5, 3]
+const LAYERS = [4, 6, 6, 5, 3]
 const COLORS = ['#34d399', '#a3e635', '#fbbf24', '#fb923c', '#fb7185']
 
-function buildNet(w: number, h: number): { nodes: Node[]; edges: [number, number][] } {
-  const nodes: Node[] = []
-  const padX = 60
-  const padY = 40
-  const gapX = (w - padX * 2) / (layers.length - 1)
-  layers.forEach((count, li) => {
-    const gapY = (h - padY * 2) / Math.max(count - 1, 1)
-    for (let i = 0; i < count; i++) {
-      nodes.push({
-        x: padX + li * gapX,
-        y: count === 1 ? h / 2 : padY + i * gapY,
-        layer: li,
-        r: 4 + Math.random() * 3,
+/* ──────────────────────────────────────────────────────────────
+   Neural network — single canvas, requestAnimationFrame.
+   No React state writes after mount → no re-renders, no hitches.
+   ────────────────────────────────────────────────────────────── */
+type Node = { x: number; y: number; layer: number; r: number; phase: number }
+type Edge = { a: number; b: number; color: string }
+type Pulse = { e: number; t: number; speed: number }
+
+function NeuralCanvas({ height }: { height: number }) {
+  const ref = useRef<HTMLCanvasElement>(null)
+  const wrapRef = useRef<HTMLDivElement>(null)
+  const stateRef = useRef<{
+    nodes: Node[]
+    edges: Edge[]
+    pulses: Pulse[]
+    w: number
+    h: number
+    dpr: number
+  }>({ nodes: [], edges: [], pulses: [], w: 0, h: 0, dpr: 1 })
+
+  useEffect(() => {
+    const canvas = ref.current
+    const wrap = wrapRef.current
+    if (!canvas || !wrap) return
+    const ctx = canvas.getContext('2d')
+    if (!ctx) return
+
+    const build = () => {
+      const dpr = Math.min(window.devicePixelRatio || 1, 1.5)
+      const rect = wrap.getBoundingClientRect()
+      const w = rect.width
+      const h = rect.height
+      canvas.width = w * dpr
+      canvas.height = h * dpr
+      canvas.style.width = w + 'px'
+      canvas.style.height = h + 'px'
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
+
+      const nodes: Node[] = []
+      const padX = 50
+      const padY = 36
+      const gapX = (w - padX * 2) / (LAYERS.length - 1)
+      LAYERS.forEach((count, li) => {
+        const gapY = (h - padY * 2) / Math.max(count - 1, 1)
+        for (let i = 0; i < count; i++) {
+          nodes.push({
+            x: padX + li * gapX,
+            y: count === 1 ? h / 2 : padY + i * gapY,
+            layer: li,
+            r: 3.5 + Math.random() * 2.5,
+            phase: Math.random() * Math.PI * 2,
+          })
+        }
       })
+
+      const edges: Edge[] = []
+      for (let li = 0; li < LAYERS.length - 1; li++) {
+        const a = nodes.filter((n) => n.layer === li)
+        const b = nodes.filter((n) => n.layer === li + 1)
+        a.forEach((na) =>
+          b.forEach((nb) => {
+            if (Math.random() < 0.7) {
+              edges.push({
+                a: nodes.indexOf(na),
+                b: nodes.indexOf(nb),
+                color: COLORS[na.layer % COLORS.length],
+              })
+            }
+          })
+        )
+      }
+
+      // pre-seed pulses: about 22% of edges, staggered
+      const pulses: Pulse[] = []
+      edges.forEach((_, i) => {
+        if (Math.random() < 0.22) {
+          pulses.push({
+            e: i,
+            t: Math.random(),
+            speed: 0.35 + Math.random() * 0.55, // per second
+          })
+        }
+      })
+
+      stateRef.current = { nodes, edges, pulses, w, h, dpr }
     }
-  })
-  const edges: [number, number][] = []
-  for (let li = 0; li < layers.length - 1; li++) {
-    const a = nodes.filter((n) => n.layer === li)
-    const b = nodes.filter((n) => n.layer === li + 1)
-    a.forEach((na) =>
-      b.forEach((nb) => {
-        if (Math.random() < 0.7) edges.push([nodes.indexOf(na), nodes.indexOf(nb)])
-      })
-    )
-  }
-  return { nodes, edges }
+
+    build()
+    const onResize = () => build()
+    window.addEventListener('resize', onResize)
+
+    let raf = 0
+    let last = performance.now()
+
+    const draw = (now: number) => {
+      const dt = Math.min(0.05, (now - last) / 1000)
+      last = now
+      const { nodes, edges, pulses, w, h } = stateRef.current
+
+      ctx.clearRect(0, 0, w, h)
+
+      // edges (static, very dim)
+      ctx.lineWidth = 0.6
+      for (const e of edges) {
+        const na = nodes[e.a]
+        const nb = nodes[e.b]
+        ctx.strokeStyle = e.color + '14' // ~8% alpha
+        ctx.beginPath()
+        ctx.moveTo(na.x, na.y)
+        ctx.lineTo(nb.x, nb.y)
+        ctx.stroke()
+      }
+
+      // pulses — advance + draw flowing dots
+      for (const p of pulses) {
+        p.t += p.speed * dt
+        if (p.t >= 1) {
+          // recycle: jump to a new random edge
+          p.t = 0
+          p.e = (p.e + 1 + Math.floor(Math.random() * 7)) % edges.length
+          p.speed = 0.35 + Math.random() * 0.55
+        }
+        const e = edges[p.e]
+        const na = nodes[e.a]
+        const nb = nodes[e.b]
+        const x = na.x + (nb.x - na.x) * p.t
+        const y = na.y + (nb.y - na.y) * p.t
+
+        // bright line trailing behind the dot
+        const tailT = Math.max(0, p.t - 0.18)
+        const tx = na.x + (nb.x - na.x) * tailT
+        const ty = na.y + (nb.y - na.y) * tailT
+        const grad = ctx.createLinearGradient(tx, ty, x, y)
+        grad.addColorStop(0, e.color + '00')
+        grad.addColorStop(1, e.color + 'cc')
+        ctx.strokeStyle = grad
+        ctx.lineWidth = 1.4
+        ctx.beginPath()
+        ctx.moveTo(tx, ty)
+        ctx.lineTo(x, y)
+        ctx.stroke()
+
+        // head
+        ctx.fillStyle = e.color
+        ctx.beginPath()
+        ctx.arc(x, y, 2.2, 0, Math.PI * 2)
+        ctx.fill()
+      }
+
+      // nodes — gentle breathing
+      for (const n of nodes) {
+        n.phase += dt * 1.6
+        const pulseR = n.r + Math.sin(n.phase) * 0.8
+        const color = COLORS[n.layer % COLORS.length]
+        // halo
+        ctx.fillStyle = color + '1a'
+        ctx.beginPath()
+        ctx.arc(n.x, n.y, pulseR + 5, 0, Math.PI * 2)
+        ctx.fill()
+        // core
+        ctx.fillStyle = color
+        ctx.beginPath()
+        ctx.arc(n.x, n.y, pulseR, 0, Math.PI * 2)
+        ctx.fill()
+      }
+
+      // layer labels
+      ctx.fillStyle = '#525252'
+      ctx.font = '10px ui-monospace, SFMono-Regular, Menlo, monospace'
+      ctx.textAlign = 'center'
+      for (let i = 0; i < LAYERS.length; i++) {
+        const x = 50 + i * ((w - 100) / (LAYERS.length - 1))
+        ctx.fillText(`L${i}`, x, h - 6)
+      }
+
+      raf = requestAnimationFrame(draw)
+    }
+    raf = requestAnimationFrame(draw)
+
+    return () => {
+      cancelAnimationFrame(raf)
+      window.removeEventListener('resize', onResize)
+    }
+  }, [])
+
+  return (
+    <div ref={wrapRef} className="absolute inset-0">
+      <canvas ref={ref} />
+    </div>
+  )
 }
 
-/* ────────── viz: typewriter terminal ────────── */
+/* ────────── typewriter terminal ────────── */
 const TERMINAL_LINES = [
   { p: '$', cmd: 'recsys.train --model=ncf --epoch=218', c: '#34d399' },
   { p: '↳', cmd: 'loss=0.0142 · ndcg@10=0.41 · auc=0.93', c: '#a3e635' },
@@ -102,9 +263,8 @@ function Terminal() {
   )
 }
 
-/* ────────── viz: activity grid ────────── */
+/* ────────── activity grid ────────── */
 function ActivityGrid() {
-  // 7 rows (days) × 22 cols (weeks)
   const cells = Array.from({ length: 7 * 22 }, (_, i) => {
     const seed = Math.sin(i * 13.37) * 10000
     const v = Math.abs(seed - Math.floor(seed))
@@ -145,7 +305,7 @@ function ActivityGrid() {
   )
 }
 
-/* ────────── viz: KPI tile with sparkline ────────── */
+/* ────────── KPI tile with sparkline ────────── */
 function KPI({
   label,
   value,
@@ -172,12 +332,8 @@ function KPI({
     <div className="panel rounded-lg p-3" style={{ borderColor: `${color}30` }}>
       <div className="text-mono text-[9px] text-neutral-500 tracking-widest">{label}</div>
       <div className="flex items-baseline justify-between mt-1">
-        <div className="text-xl font-bold" style={{ color }}>
-          {value}
-        </div>
-        <div className="text-mono text-[10px]" style={{ color }}>
-          {delta}
-        </div>
+        <div className="text-xl font-bold" style={{ color }}>{value}</div>
+        <div className="text-mono text-[10px]" style={{ color }}>{delta}</div>
       </div>
       <svg viewBox={`0 0 ${w} ${h}`} className="w-full h-7 mt-1">
         <path d={`${d} L ${w} ${h} L 0 ${h} Z`} fill={color} opacity="0.15" />
@@ -193,33 +349,20 @@ function KPI({
 }
 
 export default function Hero() {
-  const [size, setSize] = useState({ w: 1200, h: 480 })
-  const [net, setNet] = useState<{ nodes: Node[]; edges: [number, number][] }>({ nodes: [], edges: [] })
-  const [pulse, setPulse] = useState<number[]>([])
+  const [netH, setNetH] = useState(480)
 
   useEffect(() => {
-    const resize = () => {
-      const w = Math.min(window.innerWidth - 48, 1280)
-      const h = Math.min(520, Math.max(360, window.innerHeight * 0.5))
-      setSize({ w, h })
-      setNet(buildNet(w, h))
+    const update = () => {
+      setNetH(Math.min(520, Math.max(360, window.innerHeight * 0.5)))
     }
-    resize()
-    window.addEventListener('resize', resize)
-    return () => window.removeEventListener('resize', resize)
+    update()
+    window.addEventListener('resize', update)
+    return () => window.removeEventListener('resize', update)
   }, [])
-
-  useEffect(() => {
-    const i = setInterval(() => {
-      setPulse(net.edges.map((_, idx) => (Math.random() < 0.18 ? Date.now() + idx : 0)))
-    }, 900)
-    return () => clearInterval(i)
-  }, [net])
 
   return (
     <section id="top" className="relative min-h-screen overflow-hidden">
-      {/* status bar */}
-      <div className="absolute top-0 inset-x-0 z-20 border-b border-white/5 bg-ink-950/60 backdrop-blur">
+      <div className="absolute top-0 inset-x-0 z-20 border-b border-white/5 bg-ink-950/60">
         <div className="max-w-7xl mx-auto px-6 py-3 flex items-center justify-between text-mono text-[11px]">
           <div className="flex items-center gap-3">
             <span className="w-2 h-2 rounded-full bg-viz-emerald animate-pulse" />
@@ -237,7 +380,7 @@ export default function Hero() {
 
       <div className="relative z-10 max-w-7xl mx-auto px-6 pt-24 pb-12">
         <div className="grid lg:grid-cols-[1.05fr_1fr] gap-8 items-start">
-          {/* LEFT: identity + dashboards */}
+          {/* LEFT */}
           <div>
             <div className="text-mono text-[11px] text-viz-emerald mb-3 tracking-widest">
               ◢ AI / ML ENGINEER · DALLAS, TX
@@ -268,7 +411,6 @@ export default function Hero() {
               ))}
             </div>
 
-            {/* KPI sparkline tiles */}
             <div className="grid grid-cols-3 gap-3 mt-5">
               <KPI
                 label="P50 LATENCY"
@@ -293,94 +435,27 @@ export default function Hero() {
               />
             </div>
 
-            {/* terminal + activity grid */}
             <div className="grid md:grid-cols-2 gap-3 mt-3">
               <Terminal />
               <ActivityGrid />
             </div>
           </div>
 
-          {/* RIGHT: neural network */}
+          {/* RIGHT: neural network — canvas */}
           <div className="relative">
             <div className="text-mono text-[10px] text-neutral-500 mb-2 flex justify-between">
               <span>NETWORK · live inference</span>
               <span className="text-viz-emerald">● streaming</span>
             </div>
-            <div className="panel rounded-lg overflow-hidden relative" style={{ height: size.h }}>
-              <svg
-                width="100%"
-                height={size.h}
-                viewBox={`0 0 ${size.w} ${size.h}`}
-                preserveAspectRatio="xMidYMid meet"
-              >
-                {layers.map((_, i) => {
-                  const x = 60 + i * ((size.w - 120) / (layers.length - 1))
-                  return (
-                    <text
-                      key={i}
-                      x={x}
-                      y={size.h - 8}
-                      textAnchor="middle"
-                      className="text-mono"
-                      fontSize="10"
-                      fill="#525252"
-                    >
-                      L{i}
-                    </text>
-                  )
-                })}
+            <div className="panel rounded-lg overflow-hidden relative" style={{ height: netH }}>
+              <NeuralCanvas height={netH} />
 
-                {net.edges.map(([a, b], idx) => {
-                  const na = net.nodes[a]
-                  const nb = net.nodes[b]
-                  const active = pulse[idx]
-                  const color = COLORS[na.layer % COLORS.length]
-                  return (
-                    <g key={idx}>
-                      <line
-                        x1={na.x}
-                        y1={na.y}
-                        x2={nb.x}
-                        y2={nb.y}
-                        stroke={color}
-                        strokeOpacity={active ? 0.55 : 0.08}
-                        strokeWidth={active ? 1.2 : 0.6}
-                      />
-                      {active ? (
-                        <circle r={2.5} fill={color}>
-                          <animate attributeName="cx" from={na.x} to={nb.x} dur="0.9s" begin="0s" fill="freeze" />
-                          <animate attributeName="cy" from={na.y} to={nb.y} dur="0.9s" begin="0s" fill="freeze" />
-                          <animate attributeName="opacity" from="1" to="0" dur="0.9s" begin="0s" fill="freeze" />
-                        </circle>
-                      ) : null}
-                    </g>
-                  )
-                })}
-
-                {net.nodes.map((n, i) => {
-                  const color = COLORS[n.layer % COLORS.length]
-                  return (
-                    <g key={i}>
-                      <circle cx={n.x} cy={n.y} r={n.r + 4} fill={color} opacity="0.08" />
-                      <circle cx={n.x} cy={n.y} r={n.r} fill={color}>
-                        <animate
-                          attributeName="r"
-                          values={`${n.r};${n.r + 1.5};${n.r}`}
-                          dur={`${2 + (i % 3)}s`}
-                          repeatCount="indefinite"
-                        />
-                      </circle>
-                    </g>
-                  )
-                })}
-              </svg>
-
-              <div className="absolute top-3 left-3 text-mono text-[10px] text-neutral-500 space-y-1">
-                <div>layers: <span className="text-viz-emerald">{layers.length}</span></div>
-                <div>params: <span className="text-viz-amber">{net.edges.length.toLocaleString()}</span></div>
+              <div className="absolute top-3 left-3 text-mono text-[10px] text-neutral-500 space-y-1 pointer-events-none">
+                <div>layers: <span className="text-viz-emerald">{LAYERS.length}</span></div>
+                <div>params: <span className="text-viz-amber">8.4M</span></div>
                 <div>loss: <span className="text-viz-rose">0.0142</span></div>
               </div>
-              <div className="absolute bottom-3 right-3 text-mono text-[10px] text-neutral-500">
+              <div className="absolute bottom-3 right-3 text-mono text-[10px] text-neutral-500 pointer-events-none">
                 epoch <span className="text-viz-lime">218 / 256</span>
               </div>
             </div>

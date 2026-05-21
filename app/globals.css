@@ -28,9 +28,12 @@ body {
     background-size: 22px 22px;
   }
   .panel {
-    background: linear-gradient(180deg, rgba(255,255,255,0.03), rgba(255,255,255,0.01));
+    background: rgba(17, 17, 20, 0.72);
     border: 1px solid rgba(255,255,255,0.08);
-    backdrop-filter: blur(10px);
+    will-change: transform;
+  }
+  .panel-hover {
+    transition: border-color 180ms ease, box-shadow 180ms ease;
   }
   .panel-hover:hover {
     border-color: rgba(52, 211, 153, 0.4);
